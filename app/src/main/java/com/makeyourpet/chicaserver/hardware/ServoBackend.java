@@ -22,7 +22,17 @@ public interface ServoBackend {
     default void restartPort() {
     }
 
-    void setServoPulses(int[] pulses);
+    /** Stage the latest 18-channel target without performing device I/O. */
+    void stageServoPulses(int[] pulses);
+
+    /** Transmit the most recently staged target. */
+    void flushServoPulses();
+
+    /** Immediate helper retained for protocol tests and non-scheduled callers. */
+    default void setServoPulses(int[] pulses) {
+        stageServoPulses(pulses);
+        flushServoPulses();
+    }
 
     void setRelay(boolean enabled);
 

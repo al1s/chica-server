@@ -1,6 +1,5 @@
 package com.makeyourpet.chicaserver.hardware;
 
-import android.util.Log;
 import java.util.Arrays;
 
 public final class VirtualServoBackend implements ServoBackend {
@@ -42,10 +41,14 @@ public final class VirtualServoBackend implements ServoBackend {
     }
 
     @Override
-    public synchronized void setServoPulses(int[] pulses) {
+    public synchronized void stageServoPulses(int[] pulses) {
         System.arraycopy(pulses, 0, lastPulses, 0, Math.min(pulses.length, lastPulses.length));
         noteVirtualTouchPulses();
-        Log.i("CHICA_SERVO", Arrays.toString(lastPulses));
+    }
+
+    @Override
+    public void flushServoPulses() {
+        // Staging is the complete virtual-device operation.
     }
 
     @Override

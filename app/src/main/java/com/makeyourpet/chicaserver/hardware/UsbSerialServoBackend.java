@@ -23,6 +23,7 @@ final class UsbSerialServoBackend implements ServoBackend {
     private volatile boolean relayEnabled;
     private volatile double voltage = Double.NaN;
     private volatile double current = Double.NaN;
+    private byte[] stagedServoFrame;
     private final double[] legTouches = {
             Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN
     };
@@ -100,11 +101,18 @@ final class UsbSerialServoBackend implements ServoBackend {
     }
 
     @Override
-    public synchronized void setServoPulses(int[] pulses) {
-        byte[] frame = protocol == BoardProtocol.SERVO2040
-                ? ServoPacketEncoder.servo2040Pulses(pulses)
-                : ServoPacketEncoder.pololuPulses(pulses);
-        write(primaryPort, frame);
+    public synchronized void stageServoPulses(int[] pulses) {
+        if (stagedServoFrame == null) stagedServoFrame = new byte[39];
+        if (protocol == BoardProtocol.SERVO2040) {
+            ServoPacketEncoder.servo2040Pulses(pulses, stagedServoFrame);
+        } else {
+            ServoPacketEncoder.pololuPulses(pulses, stagedServoFrame);
+        }
+    }
+
+    @Override
+    public synchronized void flushServoPulses() {
+        if (stagedServoFrame != null) write(primaryPort, stagedServoFrame);
     }
 
     @Override
@@ -162,7 +170,7 @@ final class UsbSerialServoBackend implements ServoBackend {
             return;
         }
         try {
-            port.write(frame, TIMEOUT_MS);
+            port.write(frame, protocol == BoardProtocol.SERVO2040 ? 0 : TIMEOUT_MS);
             connected = true;
         } catch (IOException error) {
             connected = false;

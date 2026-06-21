@@ -36,6 +36,31 @@ public final class ChicaGaitEngine implements AutoCloseable {
         nativeReset(nativeHandle);
     }
 
+    public synchronized boolean hasActiveWalkAnchors() {
+        ensureOpen();
+        return nativeHasActiveWalkAnchors(nativeHandle);
+    }
+
+    public synchronized void beginWalkSession() {
+        ensureOpen();
+        nativeBeginWalkSession(nativeHandle);
+    }
+
+    public synchronized double beginWalkLayerFade() {
+        ensureOpen();
+        return nativeBeginWalkLayerFade(nativeHandle);
+    }
+
+    public synchronized int[] stepWalkLayerFade(double amount) {
+        ensureOpen();
+        return nativeStepWalkLayerFade(nativeHandle, amount);
+    }
+
+    public synchronized int[] finishWalkLayerFade() {
+        ensureOpen();
+        return nativeFinishWalkLayerFade(nativeHandle);
+    }
+
     public synchronized int[] enterConstructorPose() {
         ensureOpen();
         return nativeEnterConstructorPose(nativeHandle);
@@ -248,6 +273,11 @@ public final class ChicaGaitEngine implements AutoCloseable {
     private static native long nativeCreate();
     private static native void nativeDestroy(long handle);
     private static native void nativeReset(long handle);
+    private static native boolean nativeHasActiveWalkAnchors(long handle);
+    private static native void nativeBeginWalkSession(long handle);
+    private static native double nativeBeginWalkLayerFade(long handle);
+    private static native int[] nativeStepWalkLayerFade(long handle, double amount);
+    private static native int[] nativeFinishWalkLayerFade(long handle);
     private static native int[] nativeEnterConstructorPose(long handle);
     private static native int[] nativePoseRampToNeutral(long handle,
                                                         int[] legs,

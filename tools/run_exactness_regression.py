@@ -40,6 +40,10 @@ def main() -> int:
 
     checks = [
         (
+            "runtime-timing-contract",
+            [sys.executable, "tools/oracle/verify_runtime_timing_contract.py"],
+        ),
+        (
             "gait-oracles",
             [
                 sys.executable,

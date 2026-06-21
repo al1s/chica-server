@@ -1,9 +1,11 @@
 package com.makeyourpet.chicaserver.control;
 import android.util.Log;
+import com.makeyourpet.chicaserver.BuildConfig;
 import com.makeyourpet.chicaserver.gait.ChicaGaitEngine;
 import com.makeyourpet.chicaserver.hardware.ChicaServoCalibration;
 import com.makeyourpet.chicaserver.hardware.ServoBackend;
 import com.makeyourpet.chicaserver.hardware.VirtualServoBackend;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Scanner;
 import java.util.concurrent.ExecutorService;
@@ -15,10 +17,12 @@ public final class ChicaController {
     // test fixtures and verification tooling; set false for a source-accurate
     // public release so the command set matches the original interpreter.
     public static final boolean DEVELOPER_FIXTURES = false;
+    private static final boolean MOTION_TRACE_ENABLED =
+            DEVELOPER_FIXTURES || BuildConfig.MOTION_TRACE_ENABLED;
 
     private static final double ORIGINAL_STAND_BODY_Z = 40.0d;
     private static final double ORIGINAL_POSE_STEP_MS = 10.0d;
-    private static final double ORIGINAL_STOP_VECTOR_THRESHOLD = 0.18d;
+    private static final double ORIGINAL_STOP_VECTOR_THRESHOLD = 0.2d;
     private final double ORIGINAL_LEG_SITTING_Z;  // LEG_SITTING_Z from config (default -40)
     private final double ORIGINAL_QUAD_DISABLED_Z;  // z0.o:322 = femurScale*120 + LEG_CONNECTION_Z
     private static final double ORIGINAL_CALIBRATION_LOWER_STEP = -0.20000000298023224d;
@@ -72,7 +76,6 @@ public final class ChicaController {
     private volatile boolean activeWalk = false;
     private volatile boolean pendingWalkClear = false;
     private volatile boolean pendingStopStep = false;
-    private volatile boolean homePoseAfterStop = false;
     private volatile boolean walkWorkerRunning = false;
     private volatile boolean setWorkerRunning = false;
     private volatile boolean levelWorkerRunning = false;
@@ -107,12 +110,8 @@ public final class ChicaController {
     private volatile double orientationZ = 0.0d;
     private volatile WalkVector lastWalk = new WalkVector(0.0d, 0.0d, 0.0d);
     private volatile WalkVector filteredWalk = new WalkVector(0.0d, 0.0d, 0.0d);
-    // The status-string BPS is the rate the hardware-monitor worker polls the board
-    // for telemetry (the original's z0.i.b -> k.c). The on-screen joystick panel
-    // shows a separate value, panelBps: the phone orientation-sensor fusion rate
-    // (the original's f.t -> k.g).
-    private volatile long boardBpsWindowStartMillis = System.currentTimeMillis();
-    private volatile long boardPollCount = 0;
+    // Status BPS counts hardware-heartbeat iterations (the original z0.i.b). The
+    // joystick panel's panelBps is the separate orientation-sensor fusion rate.
     private volatile double bps = 0.0d;
     private volatile long panelBpsWindowStartMillis = System.currentTimeMillis();
     private volatile long panelBpsWindowFrames = 0;
@@ -141,58 +140,49 @@ public final class ChicaController {
                 robot.l1ToR1, robot.l1ToL3, robot.l2ToR2,
                 robot.legConnectionZ, robot.legSittingZ);
         enterOriginalStartupPose();
-        // The original boots into a standing pose with torque on (a fresh install
-        // reports FLAGS=110000100 before any command -- z0.o all-false defaults
-        // plus a startup stand). Reproduced here for source accuracy, but gated:
-        // with DEVELOPER_FIXTURES the rebuilt boots seated/limp (safe for bench
-        // testing); set DEVELOPER_FIXTURES=false (release) to boot standing.
-        if (!DEVELOPER_FIXTURES) {
-            setOriginalStanding(true, false);
-        }
         startOriginalHardwareMonitor();
     }
 
-    // Hardware-monitor worker, mirroring the original's z0.e(z0.i) loop. It tight-
-    // loops (1 ms) polling the board for telemetry, counts the polls, and once a
-    // second publishes that count as the status BPS (z0.i.b -> k.c) -- so BPS is the
-    // serial round-trip rate to the board, not a sensor or frame rate. Telemetry is
-    // refreshed here only; surfaceStatus just reads the cached values. The same loop
-    // runs the fault watchdog: on a serial fault (backend.hasFault(), the original's
-    // z0.i.k() latching c) it prints "Attempting to restart the port due to
-    // error..." and reopens the port (z0.i.b()), recovering transient USB errors.
-    //
-    // NOTE: the absolute BPS number is non-deterministic (it tracks serial timing,
-    // and runs fast on the no-hardware virtual backend). The port-restart branch is
-    // hardware-unverified -- the emulator's virtual/socket/tty backends never fault,
-    // so it can only be exercised against a real transient USB fault on the robot.
+    // Original z0.e heartbeat: wake at 1 ms resolution, but perform hardware work
+    // only after more than 7 ms. Every heartbeat flushes the latest staged servo
+    // packet; every second heartbeat also polls analog telemetry. Gait/pose workers
+    // stage packets instead of performing a second, redundant synchronous write.
     private void startOriginalHardwareMonitor() {
         Thread thread = new Thread(() -> {
+            long bpsWindowStart = System.currentTimeMillis();
+            long lastHeartbeat = System.currentTimeMillis();
+            int heartbeatCount = 0;
+            int communicatedHeartbeats = 0;
             while (true) {
                 try {
-                    boolean faulted = servoBackend.hasFault();
-                    if (faulted) {
-                        System.out.println("Attempting to restart the port due to error...");
-                        servoBackend.restartPort();
-                    } else {
-                        servoBackend.refreshTelemetry();
-                        // Only count a poll that actually reached a board. With no
-                        // board (disconnected / virtual with no fixture) BPS decays
-                        // to 0, matching the original where the monitor only runs
-                        // while the backend is connected (z0.i.a).
-                        if (servoBackend.isConnected()) {
-                            boardPollCount++;
+                    Thread.sleep(1L);
+                    long now = System.currentTimeMillis();
+                    if (now - lastHeartbeat > 7L) {
+                        if (servoBackend.hasFault()) {
+                            System.out.println("Attempting to restart the port due to error...");
+                            servoBackend.restartPort();
+                            Thread.sleep(250L);
+                        } else {
+                            // z0.e synchronizes on z0.i across both n() and i().
+                            synchronized (servoBackend) {
+                                servoBackend.flushServoPulses();
+                                if ((heartbeatCount % 2) == 0) {
+                                    servoBackend.refreshTelemetry();
+                                }
+                                if (servoBackend.isConnected() && !servoBackend.hasFault()) {
+                                    communicatedHeartbeats++;
+                                }
+                            }
+                            heartbeatCount++;
+                            lastHeartbeat = now;
                         }
                     }
-                    long now = System.currentTimeMillis();
-                    long elapsed = now - boardBpsWindowStartMillis;
-                    if (elapsed >= 1000L) {
-                        bps = (boardPollCount * 1000.0d) / elapsed;
-                        boardPollCount = 0;
-                        boardBpsWindowStartMillis = now;
+                    if (now - bpsWindowStart > 1000L) {
+                        bps = communicatedHeartbeats;
+                        heartbeatCount = 0;
+                        communicatedHeartbeats = 0;
+                        bpsWindowStart = now;
                     }
-                    // Tight poll loop when healthy; throttle restart attempts on a
-                    // persistent fault (the original sleeps ~250ms around z0.i.b()).
-                    Thread.sleep(faulted ? 250L : 1L);
                 } catch (InterruptedException interrupted) {
                     return;
                 } catch (Exception error) {
@@ -244,10 +234,12 @@ public final class ChicaController {
     }
 
     public synchronized void logControl(String event, String command) {
+        if (!MOTION_TRACE_ENABLED) return;
         Log.i("CHICA_CONTROL", controlTraceJson(event, command, Double.NaN));
     }
 
     public synchronized void logControlValue(String event, double value) {
+        if (!MOTION_TRACE_ENABLED) return;
         Log.i("CHICA_CONTROL", controlTraceJson(event, null, value));
     }
 
@@ -510,7 +502,15 @@ public final class ChicaController {
         } else if (command.startsWith("walkclear")) {
             requestOriginalWalkStop(true);
         } else if (command.startsWith("walk")) {
+            boolean startingWalkWorker = !walkWorkerRunning;
+            int previousWalkMode = walkModeIndex;
+            int previousAnimation = animation;
             applyWalkCommand(command);
+            if (!startingWalkWorker) {
+                // d.n0 updates only the shared target while z0.e is running.
+                walkModeIndex = previousWalkMode;
+                animation = previousAnimation;
+            }
             relayStatus = true;
             servoBackend.setRelay(true);
             if (!standing) {
@@ -520,17 +520,18 @@ public final class ChicaController {
             activeWalk = true;
             pendingWalkClear = false;
             pendingStopStep = false;
-            homePoseAfterStop = false;
-            filteredWalk = new WalkVector(0.0d, 0.0d, 0.0d);
-            lastStepMillis = System.currentTimeMillis();
-            walkStepCount = 0;
             blockMode = false;
-            startOriginalWalkWorkerLocked();
+            if (startingWalkWorker) {
+                gaitEngine.beginWalkSession();
+                filteredWalk = lerpWalk(new WalkVector(0.0d, 0.0d, 0.0d), lastWalk, 0.05d);
+                lastStepMillis = System.currentTimeMillis();
+                walkStepCount = 0;
+                startOriginalWalkWorkerLocked();
+            }
         } else if (command.startsWith("clear")) {
             activeWalk = false;
             pendingWalkClear = false;
             pendingStopStep = false;
-            homePoseAfterStop = false;
             lastWalk = new WalkVector(0.0d, 0.0d, 0.0d);
             filteredWalk = new WalkVector(0.0d, 0.0d, 0.0d);
             walkStepCount = 0;
@@ -885,30 +886,14 @@ public final class ChicaController {
     }
 
     private void handleAckRampLocked(int ackCount) {
-        // The APK queues z0.o.g(50 - ackCount) on ACKs 1..30, but the
-        // instrumented original does not emit servo frames for this path.
+        // z0.b -> z0.o.g(50 - ackCount).
+        publishOriginalHomePose(50.0d - ackCount);
     }
 
     private void enterOriginalHomePose() {
         long started = System.currentTimeMillis();
         publishOriginalHomePose(-1.0d);
         sleepRemaining(started, originalHomeBusyMillis(modeIndex));
-    }
-
-    // After a walkclear stop the original returns every leg to neutral on a
-    // single timed ramp (one 650ms "M" segment moving all six legs together),
-    // not the alternating left/right tripod ramps used by the home command.
-    private void enterOriginalWalkClearHomePose() {
-        if (activeWalk || lastPrimaryX != 0.0d || lastPrimaryY != 0.0d
-                || lastSecondaryX != 0.0d || lastSecondaryY != 0.0d) {
-            return;
-        }
-        ModeParams mode = currentMode();
-        double lift = standing ? mode.stepLift : 15.0d;
-        double layerBlend = standing ? mode.animationFactor : 0.0d;
-        double duration = 650.0d / mode.speed;
-        int[] legs = modeIndex == 4 ? quadrupedActiveLegs : ALL_LEGS;
-        publishTimedPoseRampToNeutral(legs, -1.0d, lift, layerBlend, duration);
     }
 
     private void publishOriginalHomePose(double threshold) {
@@ -1109,7 +1094,9 @@ public final class ChicaController {
                 frame[i] = (int) (((double) start[i] * (1.0d - amount)) + ((double) target[i] * amount));
             }
             lastPulses = mergeActiveLegPulses(frame);
-            Log.i("CHICA_ANIM", animationTraceJson("l", durationMs, elapsed));
+            if (MOTION_TRACE_ENABLED) {
+                Log.i("CHICA_ANIM", animationTraceJson("l", durationMs, elapsed));
+            }
             publishOriginalFrame();
             if (elapsed >= durationMs) return;
             sleepOriginalPoseStep(ORIGINAL_POSE_STEP_MS);
@@ -1147,7 +1134,9 @@ public final class ChicaController {
         while (true) {
             double elapsed = Math.max(0.0d, (double) (System.currentTimeMillis() - started));
             lastPulses = mergeActiveLegPulses(gaitEngine.sampleTimedAnimation(elapsed));
-            Log.i("CHICA_ANIM", animationTraceJson(method, durationMs, elapsed));
+            if (MOTION_TRACE_ENABLED) {
+                Log.i("CHICA_ANIM", animationTraceJson(method, durationMs, elapsed));
+            }
             publishOriginalFrame();
             if (elapsed >= durationMs) return;
             sleepOriginalPoseStep(ORIGINAL_POSE_STEP_MS);
@@ -1388,41 +1377,34 @@ public final class ChicaController {
 
     private boolean stepOriginalGait() {
         long now = System.currentTimeMillis();
-        double dtMs = Math.max(0.0d, now - lastStepMillis);
-        boolean walking = activeWalk && lastWalk.active();
-        boolean stopping = pendingStopStep && filteredWalk.active();
-        boolean clearing = pendingWalkClear && filteredWalk.active();
-        if (!relayStatus || !standing || (!walking && !stopping && !clearing)) return false;
+        double dtMs = Math.max(0.0d, now - lastStepMillis) * currentMode().speed;
+        boolean transitioningToStop = pendingWalkClear;
+        boolean walking = activeWalk || transitioningToStop;
+        boolean stopping = pendingStopStep;
+        if (!relayStatus || !standing || (!walking && !stopping)) return false;
         dtMs = originalFrameDt(walkStepCount, dtMs);
         lastStepMillis = now;
-        if (walking) {
-            filteredWalk = lerpWalk(filteredWalk, lastWalk, 0.05d);
-        } else if (stopping) {
-            filteredWalk = scaleWalk(filteredWalk, 0.9d);
-        }
-        boolean allowGait = !stopping || maxAbsWalk(filteredWalk) >= ORIGINAL_STOP_VECTOR_THRESHOLD;
+        boolean allowGait = walking || walkMagnitude(filteredWalk) > ORIGINAL_STOP_VECTOR_THRESHOLD;
         lastPulses = mergeActiveLegPulses(gaitEngine.step(gaitForMode(), animation,
                 filteredWalk.forward, filteredWalk.strafe, filteredWalk.turn, dtMs, allowGait));
-        Log.i("CHICA_GAIT", gaitEngine.lastCompactTraceJson());
         walkStepCount++;
         publishOriginalFrame();
-        if (pendingWalkClear && (walking || clearing)) {
+        if (MOTION_TRACE_ENABLED) Log.i("CHICA_GAIT", gaitEngine.lastCompactTraceJson());
+
+        if (transitioningToStop) {
+            // z0.e finishes one frame with its worker-local target before it
+            // observes shared f.g == null and begins 0.9 decay next iteration.
             pendingWalkClear = false;
-            activeWalk = false;
-            lastWalk = new WalkVector(0.0d, 0.0d, 0.0d);
-            lastPulses = mergeActiveLegPulses(gaitEngine.step(gaitForMode(), animation,
-                    filteredWalk.forward, filteredWalk.strafe, filteredWalk.turn,
-                    originalFrameDt(walkStepCount, dtMs), false));
-            Log.i("CHICA_GAIT", gaitEngine.lastCompactTraceJson());
-            walkStepCount++;
-            publishOriginalFrame();
+            pendingStopStep = true;
+        } else if (walking) {
+            // z0.e blends the next frame's worker-local command only after the
+            // current gait step, so target updates never reset phase or dt.
+            filteredWalk = lerpWalk(filteredWalk, lastWalk, 0.05d);
+        } else if (allowGait) {
+            filteredWalk = scaleWalk(filteredWalk, 0.9d);
+        } else if (!gaitEngine.hasActiveWalkAnchors()) {
             pendingStopStep = false;
-            filteredWalk = new WalkVector(0.0d, 0.0d, 0.0d);
-            walkStepCount = 0;
-            return false;
-        }
-        if (stopping && !allowGait) {
-            pendingStopStep = false;
+            pendingWalkClear = false;
             filteredWalk = new WalkVector(0.0d, 0.0d, 0.0d);
             walkStepCount = 0;
             return false;
@@ -1433,16 +1415,12 @@ public final class ChicaController {
     private void startOriginalWalkWorkerLocked() {
         if (walkWorkerRunning) return;
         walkWorkerRunning = true;
+        final boolean preserveKeptQuadrupedPose = keepMode && modeIndex == 4;
         Thread thread = new Thread(() -> {
             while (true) {
                 synchronized (ChicaController.this) {
                     if (!stepOriginalGait()) {
-                        walkWorkerRunning = false;
-                        if (homePoseAfterStop) {
-                            homePoseAfterStop = false;
-                            enterOriginalWalkClearHomePose();
-                        }
-                        return;
+                        break;
                     }
                 }
                 sleepOriginalPoseStep(ORIGINAL_POSE_STEP_MS);
@@ -1453,9 +1431,37 @@ public final class ChicaController {
                     return;
                 }
             }
+            // z0.e skips p3.a.p() only for a kept quadruped pose (gait id 20).
+            if (!preserveKeptQuadrupedPose) {
+                publishOriginalWalkLayerFade();
+            }
+            synchronized (ChicaController.this) {
+                walkWorkerRunning = false;
+            }
         }, "chica-original-walk");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    private void publishOriginalWalkLayerFade() {
+        double magnitude = gaitEngine.beginWalkLayerFade();
+        long previous = System.currentTimeMillis();
+        while (magnitude > 0.05000000074505806d) {
+            long now = System.currentTimeMillis();
+            double amount = currentMode().speed * 0.1d * (double) (now - previous);
+            if (amount >= magnitude) break;
+            synchronized (this) {
+                lastPulses = mergeActiveLegPulses(gaitEngine.stepWalkLayerFade(amount));
+                publishOriginalFrame();
+            }
+            sleepOriginalPoseStep(ORIGINAL_POSE_STEP_MS);
+            magnitude -= amount;
+            previous = now;
+        }
+        synchronized (this) {
+            lastPulses = mergeActiveLegPulses(gaitEngine.finishWalkLayerFade());
+            publishOriginalFrame();
+        }
     }
 
     private static double originalFrameDt(int stepCount, double measuredDtMs) {
@@ -1464,35 +1470,29 @@ public final class ChicaController {
     }
 
     private void publishOriginalFrame() {
-        servoBackend.setServoPulses(lastPulses);
+        servoBackend.stageServoPulses(lastPulses);
+        if (MOTION_TRACE_ENABLED) Log.i("CHICA_SERVO", Arrays.toString(lastPulses));
         frameCount++;
         updatePanelBps();
     }
 
     private void requestOriginalWalkStop(boolean logTargetNull) {
-        if (standing && relayStatus && activeWalk && lastWalk.active() && filteredWalk.active()) {
-            pendingStopStep = true;
-            pendingWalkClear = false;
-            homePoseAfterStop = logTargetNull;
+        if (logTargetNull) {
+            logControl("walkclear_target_null", null);
+        }
+        if (standing && relayStatus && walkWorkerRunning) {
+            pendingStopStep = false;
+            pendingWalkClear = true;
             activeWalk = false;
             lastWalk = new WalkVector(0.0d, 0.0d, 0.0d);
-            if (logTargetNull) {
-                logControl("walkclear_target_null", null);
-            }
-            startOriginalWalkWorkerLocked();
             return;
         }
-        pendingStopStep = standing && relayStatus && walkStepCount > 0 && filteredWalk.active();
+        pendingStopStep = false;
         pendingWalkClear = false;
         activeWalk = false;
         lastWalk = new WalkVector(0.0d, 0.0d, 0.0d);
-        if (!pendingStopStep) {
-            filteredWalk = new WalkVector(0.0d, 0.0d, 0.0d);
-            walkStepCount = 0;
-        } else {
-            homePoseAfterStop = logTargetNull;
-            startOriginalWalkWorkerLocked();
-        }
+        filteredWalk = new WalkVector(0.0d, 0.0d, 0.0d);
+        walkStepCount = 0;
     }
 
     private int gaitForMode() {
@@ -1685,8 +1685,10 @@ public final class ChicaController {
                 from.turn * scale);
     }
 
-    private static double maxAbsWalk(WalkVector vector) {
-        return Math.max(Math.max(Math.abs(vector.forward), Math.abs(vector.strafe)), Math.abs(vector.turn));
+    private static double walkMagnitude(WalkVector vector) {
+        return Math.sqrt((vector.forward * vector.forward)
+                + (vector.strafe * vector.strafe)
+                + (vector.turn * vector.turn));
     }
 
     private static double lerp(double from, double to, double amount) {

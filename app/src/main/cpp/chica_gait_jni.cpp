@@ -47,6 +47,8 @@ struct Engine {
     int lastAnimation = 0;
     double lastDtMs = 0.0;
     bool lastAllowNewAnchors = true;
+    apk_model::BodyState walkLayerFadeBody;
+    bool walkLayerFadeActive = false;
 
     Engine()
     {
@@ -480,6 +482,49 @@ double levelLayerMagnitude(const Engine& engine)
     return poseMagnitude(engine.layers[3].xyz) + (poseMagnitude(engine.layers[3].uvw) * 4.0);
 }
 
+double layerMagnitude(const apk_model::Pose& pose)
+{
+    return poseMagnitude(pose.xyz) + (poseMagnitude(pose.uvw) * 4.0);
+}
+
+double beginWalkLayerFade(Engine& engine)
+{
+    apk_model::Pose combined = {};
+    for (const auto& layer : engine.layers) {
+        combined = apk_model::addPose(combined, layer);
+    }
+    engine.layers = {};
+    engine.layers[0] = combined;
+    engine.state.animation_layer = combined;
+    engine.walkLayerFadeBody = engine.state.body;
+    engine.walkLayerFadeActive = true;
+    return layerMagnitude(combined);
+}
+
+std::array<int, 18> stepWalkLayerFade(Engine& engine, double amount)
+{
+    if (!engine.walkLayerFadeActive) {
+        return toPulsesFromPose(engine);
+    }
+    engine.state.body = engine.walkLayerFadeBody;
+    double magnitude = layerMagnitude(engine.layers[0]);
+    if (magnitude > 0.0 && amount < magnitude) {
+        scalePoseInPlace(engine.layers[0], (magnitude - std::max(0.0, amount)) / magnitude);
+    }
+    return toPulsesFromPose(engine);
+}
+
+std::array<int, 18> finishWalkLayerFade(Engine& engine)
+{
+    if (engine.walkLayerFadeActive) {
+        engine.state.body = engine.walkLayerFadeBody;
+    }
+    engine.layers[0] = {};
+    engine.state.animation_layer = {};
+    engine.walkLayerFadeActive = false;
+    return toPulsesFromPose(engine);
+}
+
 std::array<int, 18> applyLevelPose(Engine& engine, double x, double y)
 {
     engine.layers[3].uvw.y = std::min(30.0, std::max(-30.0, x * 20.0));
@@ -700,6 +745,67 @@ Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeReset(JNIEnv*, jclas
         engine->setVelocity = {};
         toPulsesFromPose(*engine);
     }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeHasActiveWalkAnchors(
+        JNIEnv*, jclass, jlong handle)
+{
+    auto* engine = fromHandle(handle);
+    if (engine == nullptr) {
+        return JNI_FALSE;
+    }
+    for (bool active : engine->state.anchor_active) {
+        if (active) return JNI_TRUE;
+    }
+    return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeBeginWalkSession(
+        JNIEnv*, jclass, jlong handle)
+{
+    auto* engine = fromHandle(handle);
+    if (engine == nullptr) {
+        return;
+    }
+    // z0.e keeps phase and anchors in each worker. A new worker starts at
+    // phase zero from the robot pose left by the previous worker/home ramp.
+    engine->state.phase = 0.0;
+    engine->state.anchors = {};
+    engine->state.anchor_active = {};
+}
+
+extern "C" JNIEXPORT jdouble JNICALL
+Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeBeginWalkLayerFade(
+        JNIEnv*, jclass, jlong handle)
+{
+    auto* engine = fromHandle(handle);
+    return engine == nullptr ? 0.0 : beginWalkLayerFade(*engine);
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeStepWalkLayerFade(
+        JNIEnv* env, jclass, jlong handle, jdouble amount)
+{
+    auto* engine = fromHandle(handle);
+    if (engine == nullptr) {
+        return env->NewIntArray(0);
+    }
+    engine->lastPulses = stepWalkLayerFade(*engine, amount);
+    return toPulseArray(env, engine->lastPulses);
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeFinishWalkLayerFade(
+        JNIEnv* env, jclass, jlong handle)
+{
+    auto* engine = fromHandle(handle);
+    if (engine == nullptr) {
+        return env->NewIntArray(0);
+    }
+    engine->lastPulses = finishWalkLayerFade(*engine);
+    return toPulseArray(env, engine->lastPulses);
 }
 
 extern "C" JNIEXPORT jintArray JNICALL

@@ -6,6 +6,12 @@ public final class ServoPacketEncoder {
 
     public static byte[] servo2040Pulses(int[] pulses) {
         byte[] frame = new byte[39];
+        servo2040Pulses(pulses, frame);
+        return frame;
+    }
+
+    public static void servo2040Pulses(int[] pulses, byte[] frame) {
+        if (frame.length != 39) throw new IllegalArgumentException("Servo2040 frame must be 39 bytes");
         frame[0] = (byte) 0xd3;
         frame[1] = 0;
         frame[2] = 18;
@@ -15,11 +21,16 @@ public final class ServoPacketEncoder {
             frame[offset] = (byte) (pulse & 0x7f);
             frame[offset + 1] = (byte) ((pulse >> 7) & 0x7f);
         }
-        return frame;
     }
 
     public static byte[] pololuPulses(int[] pulses) {
         byte[] frame = new byte[39];
+        pololuPulses(pulses, frame);
+        return frame;
+    }
+
+    public static void pololuPulses(int[] pulses, byte[] frame) {
+        if (frame.length != 39) throw new IllegalArgumentException("Pololu frame must be 39 bytes");
         frame[0] = (byte) 0x9f;
         frame[1] = 18;
         frame[2] = 0;
@@ -29,7 +40,6 @@ public final class ServoPacketEncoder {
             frame[offset] = (byte) (quarterMicroseconds & 0x7f);
             frame[offset + 1] = (byte) ((quarterMicroseconds >> 7) & 0x7f);
         }
-        return frame;
     }
 
     public static byte[] servo2040DigitalOut(int pin, boolean enabled) {

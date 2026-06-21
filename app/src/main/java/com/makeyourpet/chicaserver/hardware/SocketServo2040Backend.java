@@ -24,6 +24,7 @@ final class SocketServo2040Backend implements ServoBackend {
     private volatile boolean relayEnabled;
     private volatile double voltage = Double.NaN;
     private volatile double current = Double.NaN;
+    private byte[] stagedServoFrame;
     private final double[] legTouches = {
             Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN
     };
@@ -75,8 +76,14 @@ final class SocketServo2040Backend implements ServoBackend {
     }
 
     @Override
-    public synchronized void setServoPulses(int[] pulses) {
-        write(ServoPacketEncoder.servo2040Pulses(pulses));
+    public synchronized void stageServoPulses(int[] pulses) {
+        if (stagedServoFrame == null) stagedServoFrame = new byte[39];
+        ServoPacketEncoder.servo2040Pulses(pulses, stagedServoFrame);
+    }
+
+    @Override
+    public synchronized void flushServoPulses() {
+        if (stagedServoFrame != null) write(stagedServoFrame);
     }
 
     @Override

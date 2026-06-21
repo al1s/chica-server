@@ -38,8 +38,8 @@ public final class FullscreenActivity extends AppCompatActivity {
         @Override
         public void run() {
             if (infoSurfaceView == null) return;
-            infoSurfaceView.setSurfaceStatus(controller.surfaceStatus(ipAddress()));
-            infoSurfaceView.postDelayed(this, 250);
+            refreshNow();
+            infoSurfaceView.postDelayed(this, 83);
         }
     };
 
@@ -82,11 +82,9 @@ public final class FullscreenActivity extends AppCompatActivity {
 
         findViewById(R.id.buttonBlock).setOnClickListener(view -> {
             controller.requestBlock();
-            refreshNow();
         });
         findViewById(R.id.buttonTorque).setOnClickListener(view -> {
             controller.requestTorque();
-            refreshNow();
         });
         findViewById(R.id.buttonConfig).setOnClickListener(view -> showConfigDialog());
         findViewById(R.id.buttonCamera).setOnClickListener(view -> toggleCameraView());
