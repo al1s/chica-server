@@ -178,6 +178,11 @@ public final class ChicaGaitEngine implements AutoCloseable {
         return nativeStepSetPose(nativeHandle, x, y, z, u, v, w, dtMs);
     }
 
+    public synchronized int[] stepSetSweep(double dR, double dS, boolean z5, double dtMs) {
+        ensureOpen();
+        return nativeStepSetSweep(nativeHandle, dR, dS, z5, dtMs);
+    }
+
     public synchronized int[] clearSetPose() {
         ensureOpen();
         return nativeClearSetPose(nativeHandle);
@@ -352,6 +357,11 @@ public final class ChicaGaitEngine implements AutoCloseable {
                                                   double v,
                                                   double w,
                                                   double dtMs);
+    private static native int[] nativeStepSetSweep(long handle,
+                                                   double dR,
+                                                   double dS,
+                                                   boolean z5,
+                                                   double dtMs);
     private static native int[] nativeClearSetPose(long handle);
     private static native void nativeSetServoConfig(int[] cal36, double[] coxa6,
                                                     double femurAttach, double tibiaAttach,

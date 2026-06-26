@@ -80,6 +80,9 @@ public final class ChicaController {
     private volatile boolean setWorkerRunning = false;
     private volatile boolean levelWorkerRunning = false;
     private volatile long setPoseDecayUntilMillis = 0L;
+    // Continuous angular-sweep set-poses (the original's worker case 2, p3.a.G):
+    // 0 = static set-pose integrator, 1 = dive (z5=true), 2 = setrotate/flex (z5=false).
+    private volatile int setSweepMode = 0;
     private volatile int walkStepCount = 0;
     private volatile int[] quadrupedActiveLegs = {0, 3, 2, 5};
     private volatile int[] activeOutputLegs = ALL_LEGS;
@@ -622,6 +625,15 @@ public final class ChicaController {
             lastPrimaryX = e[0];
             lastPrimaryY = e[1];
         }
+        // dive and setrotate route to the continuous angular sweep (G), not the
+        // static set-pose integrator. They differ only by pose form (z5).
+        if (command.startsWith("setdive:")) {
+            setSweepMode = 1;
+        } else if (command.startsWith("setrotate:")) {
+            setSweepMode = 2;
+        } else {
+            setSweepMode = 0;
+        }
         if (isQuadOutputMode()) {
             publishOriginalFrame();
             if (isQuad25SetMode()) {
@@ -641,6 +653,9 @@ public final class ChicaController {
         lastPrimaryY = 0.0d;
         lastSecondaryX = 0.0d;
         lastSecondaryY = 0.0d;
+        // Let the post-release decay ramp the orbit pose back down via the static
+        // integrator, then clearSetPose resets the sweep angle.
+        setSweepMode = 0;
     }
 
     private void setOriginalRelay(boolean enabled) {
@@ -750,14 +765,24 @@ public final class ChicaController {
         }
         double dtMs = Math.max(0.0d, now - lastStepMillis) * currentMode().speed;
         lastStepMillis = now;
-        lastPulses = mergeActiveLegPulses(gaitEngine.stepSetPose(
-                lastPrimaryX,
-                lastPrimaryY,
-                0.0d,
-                0.0d,
-                lastSecondaryX,
-                lastSecondaryY,
-                dtMs));
+        if (setSweepMode != 0) {
+            // Continuous orbit: the held stick (lastPrimaryX/Y = the original's
+            // aVar.R()/S()) sets the sweep speed; the body keeps animating.
+            lastPulses = mergeActiveLegPulses(gaitEngine.stepSetSweep(
+                    lastPrimaryX,
+                    lastPrimaryY,
+                    setSweepMode == 1,
+                    dtMs));
+        } else {
+            lastPulses = mergeActiveLegPulses(gaitEngine.stepSetPose(
+                    lastPrimaryX,
+                    lastPrimaryY,
+                    0.0d,
+                    0.0d,
+                    lastSecondaryX,
+                    lastSecondaryY,
+                    dtMs));
+        }
         publishOriginalFrame();
         return true;
     }

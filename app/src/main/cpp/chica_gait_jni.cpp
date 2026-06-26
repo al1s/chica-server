@@ -41,6 +41,9 @@ struct Engine {
     TimedAnimation timed;
     apk_model::WalkStepResult lastStep;
     apk_model::Pose setVelocity;
+    double sweepAngle = 0.0;
+    double sweepDR = 0.0;
+    double sweepDS = 0.0;
     std::array<int, 18> lastPulses = {};
     int lastJavaGait = 1;
     int lastApkGait = 5;
@@ -474,6 +477,48 @@ std::array<int, 18> stepSetPose(Engine& engine, apk_model::Pose target, double d
     scalePoseInPlace(engine.setVelocity, 0.92);
     engine.layers[3] = apk_model::addPose(engine.layers[3], engine.setVelocity);
     clampPose(engine.layers[3], engine.config.femur_scale);
+    return toPulsesFromPose(engine);
+}
+
+// Continuous angular sweep set-pose (the original's p3.a.G, worker case 2).
+// dive/setrotate hold the stick and the body orbits at a speed set by the stick
+// magnitude, advancing an angle each step and writing the rotating pose into
+// layer 3 directly (no settling integrator). dR/dS are the original's
+// aVar.R()/S() (= the primary stick pair). z5 picks the pose form: true = dive
+// (y-translation + z-yaw), false = setrotate/flex (circular x/y translation).
+std::array<int, 18> stepSetSweep(Engine& engine, double dR, double dS, bool z5, double dtMs)
+{
+    // Smooth the stick toward its target (the original's worker lerps the target
+    // pose by 0.05 each step before handing it to G), so joystick moves ease in
+    // instead of snapping.
+    engine.sweepDR += 0.05 * (dR - engine.sweepDR);
+    engine.sweepDS += 0.05 * (dS - engine.sweepDS);
+    dR = engine.sweepDR;
+    dS = engine.sweepDS;
+    double mag = std::sqrt((dR * dR) + (dS * dS));
+    double rate = std::min(1.0, std::max(-1.0, (dR + dS) * 8.0)) * 360.0 * mag;
+    engine.sweepAngle += (std::max(0.0, dtMs) / 1000.0) * rate;
+    while (engine.sweepAngle >= 360.0) engine.sweepAngle -= 360.0;
+    while (engine.sweepAngle < 0.0) engine.sweepAngle += 360.0;
+    double a = (engine.sweepAngle * M_PI) / 180.0;
+    double sa = std::sin(a);
+    double ca = std::cos(a);
+    apk_model::Pose p = {};
+    if (z5) {
+        p.xyz = {dR * sa, dS * sa, 0.0};
+        p.uvw = {0.0, dR * ca, -dS * ca};
+    } else {
+        p.xyz = {-dS * sa, dS * ca, 0.0};
+        p.uvw = {0.0, dR * ca, -dR * sa};
+    }
+    normalizePoseVectors(p);
+    // rotation scale (the original's j.f7126e uses min(R,S), so xyz is uniform
+    // 60, not the static set-pose's 60/100/100).
+    double sxyz = 60.0 * engine.config.femur_scale;
+    double suvw = 18.0 * engine.config.femur_scale;
+    p.xyz.x *= sxyz; p.xyz.y *= sxyz; p.xyz.z *= sxyz;
+    p.uvw.x *= suvw; p.uvw.y *= suvw; p.uvw.z *= suvw;
+    engine.layers[3] = p;
     return toPulsesFromPose(engine);
 }
 
@@ -1282,7 +1327,28 @@ Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeClearSetPose(
     }
     engine->layers[3] = {};
     engine->setVelocity = {};
+    engine->sweepAngle = 0.0;
+    engine->sweepDR = 0.0;
+    engine->sweepDS = 0.0;
     engine->lastPulses = toPulsesFromPose(*engine);
+    return toPulseArray(env, engine->lastPulses);
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_makeyourpet_chicaserver_gait_ChicaGaitEngine_nativeStepSetSweep(
+        JNIEnv* env,
+        jclass,
+        jlong handle,
+        jdouble dR,
+        jdouble dS,
+        jboolean z5,
+        jdouble dtMs)
+{
+    auto* engine = fromHandle(handle);
+    if (engine == nullptr) {
+        return env->NewIntArray(0);
+    }
+    engine->lastPulses = stepSetSweep(*engine, dR, dS, z5 == JNI_TRUE, dtMs);
     return toPulseArray(env, engine->lastPulses);
 }
 
